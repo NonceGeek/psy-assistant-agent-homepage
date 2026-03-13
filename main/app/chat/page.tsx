@@ -11,6 +11,7 @@ export default function ChatPage() {
       chatbotIntroMessage={config.chatbotIntroMessage}
       chatApiUrl={config.chatApiUrl}
       chatLib={config.chatLib}
+      searchMode={config.searchMode}
     />
   );
 }

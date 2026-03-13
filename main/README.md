@@ -64,6 +64,10 @@ A configurable Next.js scaffold for building AI Agent homepages with a built-in 
   * **description:** TF-IDF library name used by the search_and_chat RAG endpoint
   * **value:** `"tfidf"`
 
+* **searchMode**
+  * **description:** search mode of the Chatbot, tfidf or vector
+  * **value:** `"vector"`
+
 
 ## Quick Start
 

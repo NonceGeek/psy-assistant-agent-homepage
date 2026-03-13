@@ -17,6 +17,7 @@ export type AppConfig = {
   chatbotIntroMessage: string;
   chatApiUrl: string;
   chatLib: string;
+  searchMode: string;
 };
 
 const REQUIRED_KEYS: Array<keyof AppConfig> = [
@@ -34,6 +35,7 @@ const REQUIRED_KEYS: Array<keyof AppConfig> = [
   "chatbotIntroMessage",
   "chatApiUrl",
   "chatLib",
+  "searchMode",
 ];
 
 function parseValue(rawValue: string): unknown {

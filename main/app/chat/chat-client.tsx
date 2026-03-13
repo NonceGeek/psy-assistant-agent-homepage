@@ -10,6 +10,7 @@ type ChatClientProps = {
   chatbotIntroMessage: string;
   chatApiUrl: string;
   chatLib: string;
+  searchMode: string;
 };
 
 type ChatMessage = {
@@ -27,7 +28,8 @@ type InterceptorDetails = {
 type Source = {
   rank: number;
   score: number;
-  chunk: {
+  text?: string;
+  chunk?: {
     book_title: string;
     author: string;
     chapter_title: string;
@@ -57,11 +59,13 @@ export function ChatClient({
   chatbotIntroMessage,
   chatApiUrl,
   chatLib,
+  searchMode,
 }: ChatClientProps) {
   const chatRef = useRef<DeepChatElement | null>(null);
 
   useEffect(() => {
     const el = chatRef.current;
+    console.log("ref value:", el);  // 这行一定会执行
     if (!el) return;
 
     el.request = {
@@ -70,8 +74,10 @@ export function ChatClient({
       headers: { "Content-Type": "application/json" },
     };
 
+    console.log("testtest");
+
     // Transform Deep Chat messages into the search_and_chat RAG request format:
-    // { q: <latest user question>, lib, topk, messages: <prior conversation> }
+    // { q, search_mode, lib?, topk, messages }
     el.requestInterceptor = (details: InterceptorDetails) => {
       const allMessages = (details.body.messages || []).map((msg) => ({
         role: msg.role,
@@ -81,30 +87,40 @@ export function ChatClient({
       const lastMessage = allMessages[allMessages.length - 1];
       const priorMessages = allMessages.slice(0, -1);
 
-      details.body = {
+      const payload: Record<string, unknown> = {
         q: lastMessage?.content ?? "",
-        lib: chatLib,
+        search_mode: searchMode,
         topk: 5,
         messages: priorMessages,
-      } as unknown as InterceptorDetails["body"];
+      };
+      // lib is only needed for tfidf mode
+      if (searchMode === "tfidf") {
+        payload.lib = chatLib;
+      }
+
+      details.body = payload as unknown as InterceptorDetails["body"];
       return details;
     };
+
     // Append source citations from the RAG response to the displayed text
     el.responseInterceptor = (response: ResponseDetails) => {
       if (!response.sources?.length) return response;
 
       const citations = response.sources
-        .map(
-          (s) =>
-            `[${s.rank}] 《${s.chunk.book_title}》${s.chunk.chapter_title} (chunk#${s.chunk.chunk_index}, score ${s.score})`,
-        )
+        .map((s) => {
+          if (s.chunk) {
+            return `[${s.rank}] 《${s.chunk.book_title}》${s.chunk.chapter_title} (chunk#${s.chunk.chunk_index}, score ${s.score})`;
+          }
+          // Vector mode sources have text directly
+          return `[${s.rank}] score ${s.score}`;
+        })
         .join("\n");
 
       return {
         text: `${response.text ?? ""}\n\n---\n📚 引用来源：\n${citations}`,
       };
     };
-  }, [chatApiUrl, chatLib]);
+  }, [chatApiUrl, chatLib, searchMode]);
 
   return (
     <div className="min-h-screen bg-background flex flex-col">

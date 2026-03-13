@@ -200,6 +200,13 @@ curl "http://localhost:4403/api/vector_search?q=如何面对焦虑&topk=5"
 
 RAG (Retrieval-Augmented Generation) endpoint. Retrieves relevant context via TF-IDF or vector search, builds a context-aware prompt, and sends it to the LLM. Returns the AI answer together with the sources used.
 
+Supports two retrieval backends via `search_mode`:
+
+| Mode | Backend | Requires |
+|------|---------|----------|
+| `"tfidf"` (default) | In-memory TF-IDF sparse search | `lib` parameter + `data_<lib>/chunks.jsonl` |
+| `"vector"` | Supabase pgvector semantic search | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `match_agent_lib_psy` SQL function |
+
 **Request Body:**
 ```json
 {
@@ -214,15 +221,15 @@ RAG (Retrieval-Augmented Generation) endpoint. Retrieves relevant context via TF
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `q` | string | Yes | — | User question |
+| `search_mode` | string | No | `"tfidf"` | Retrieval backend: `"tfidf"` or `"vector"` |
 | `lib` | string | Conditional | — | Library name (required when `search_mode` is `"tfidf"`) |
 | `topk` | number | No | `5` | Number of chunks to retrieve (1–50) |
 | `messages` | array | No | `[]` | Prior conversation messages for multi-turn context. Each has `role` and `content`. |
-| `search_mode` | string | No | `"tfidf"` | Retrieval backend: `"tfidf"` (in-memory sparse) or `"vector"` (Supabase pgvector semantic) |
 
-**Success Response (200):**
+**Success Response — TF-IDF mode (200):**
 ```json
 {
-  "text": "根据资料，藏传佛教认为死亡是……\n\n引用来源：第三章 死亡与转世 chunk#2",
+  "text": "根据资料，藏传佛教认为死亡是……",
   "sources": [
     {
       "rank": 1,
@@ -239,17 +246,53 @@ RAG (Retrieval-Augmented Generation) endpoint. Retrieves relevant context via TF
 }
 ```
 
+**Success Response — Vector mode (200):**
+```json
+{
+  "text": "根据资料，面对焦虑时可以……",
+  "sources": [
+    {
+      "rank": 1,
+      "score": 0.8234,
+      "text": "..."
+    }
+  ]
+}
+```
+
 **Error Responses:**
 
-- `400` — Missing `lib` or `q`
-- `404` — Library not found
-- `500` — API key not configured or internal error
+- `400` — Missing `q`, or missing `lib` when `search_mode` is `"tfidf"`
+- `404` — Library not found (TF-IDF mode only)
+- `500` — API key not configured, Supabase not configured, or internal error
 
-**Example:**
+**Example — TF-IDF mode:**
 ```bash
 curl -X POST http://localhost:4403/api/search_and_chat \
   -H "Content-Type: application/json" \
   -d '{"q": "藏传佛教如何看待死亡", "lib": "tfidf", "topk": 5}'
+```
+
+**Example — Vector mode:**
+```bash
+curl -X POST http://localhost:4403/api/search_and_chat \
+  -H "Content-Type: application/json" \
+  -d '{"q": "如何面对焦虑", "search_mode": "vector", "topk": 5}'
+```
+
+**Example — Vector mode with multi-turn context:**
+```bash
+curl -X POST http://localhost:4403/api/search_and_chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "q": "那具体应该怎么做呢",
+    "search_mode": "vector",
+    "topk": 5,
+    "messages": [
+      {"role": "user", "content": "如何面对焦虑"},
+      {"role": "assistant", "content": "面对焦虑时，可以尝试……"}
+    ]
+  }'
 ```
 
 ---

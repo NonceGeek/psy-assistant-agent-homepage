@@ -32,3 +32,6 @@ Response returned with answer text + source citations
 * Optimze the prompt in deno server
 * use New Model (qwen/qwen3-30b-a3b) 
 * Optimize the search way
+    * tfidf way
+    * vector way
+    * allow history

@@ -9,6 +9,7 @@ TODO（NOT DELETE):
 - 将 API 的调用替换为 OpenRouter 的 API
  */
 
+import { oakCors } from "cors";
 import { Application, Router } from "https://deno.land/x/oak@v12.6.1/mod.ts";
 import { CSS, render } from "@deno/gfm";
 import { createClient, SupabaseClient } from "npm:@supabase/supabase-js@2";
@@ -248,7 +249,7 @@ type VectorResult = {
 };
 
 // Requires a Supabase SQL function:
-//   match_agent_lib_psy(query_embedding vector(1024), match_threshold float, match_count int)
+//   match_lib_psy(query_embedding vector(1024), match_threshold float, match_count int)
 async function vectorSearch(
   query: string,
   topk = 5,
@@ -257,7 +258,7 @@ async function vectorSearch(
   if (!supabase) throw new Error("Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)");
 
   const embedding = await getQueryEmbedding(query);
-  const { data, error } = await supabase.rpc("match_agent_lib_psy", {
+  const { data, error } = await supabase.rpc("match_lib_psy", {
     query_embedding: embedding,
     match_threshold: threshold,
     match_count: topk,
@@ -465,6 +466,7 @@ router
         contextChunks = results
           .map((r, i) => `[vector result #${i + 1}, similarity ${r.similarity.toFixed(4)}]\n${r.embedding_input}`)
           .join("\n\n---\n\n");
+        console.log("vector search results:", contextChunks);
       } else {
         // TF-IDF sparse search (requires lib)
         if (!lib.trim()) {
@@ -493,6 +495,7 @@ router
               `[${r.chunk.chapter_title} | ${r.chunk.href} chunk#${r.chunk.chunk_index}]\n${r.chunk.text}`,
           )
           .join("\n\n---\n\n");
+        console.log("tfidf search results:", contextChunks);
       }
 
       // Step 2: build RAG messages
@@ -533,6 +536,8 @@ router
         { role: "user", content: q },
       ];
 
+      console.log("messages:", messages);
+
       // Step 3: call LLM via OpenRouter
       const text = await callLLM(messages);
 
@@ -569,6 +574,8 @@ app.use(async (context, next) => {
   console.log(`${context.request.method} ${context.request.url} - ${ms}ms`);
 });
 
+// Enable CORS for All Routes
+app.use(oakCors()); 
 
 // Middleware: Router
 app.use(router.routes());
