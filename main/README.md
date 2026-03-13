@@ -54,7 +54,7 @@ A configurable Next.js scaffold for building AI Agent homepages with a built-in 
 
 * **chatbotIntroMessage**
   * **description:** Initial greeting message in the chat window
-  * **value:** `"你好！我是心理学助手 PsyAssistant~ 你有什么问题都可以问我哦~"`
+  * **value:** `"你好！我是心理学助手 PsyAssistant~ 你有什么问题都可以问我哦❤️~"`
 
 * **chatApiUrl**
   * **description:** Backend API endpoint for the chat
