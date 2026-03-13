@@ -28,3 +28,7 @@ Response returned with answer text + source citations
 - Response interceptor appends RAG source citations (book, chapter, chunk, score) to the reply.
 
 ## v2
+
+* Optimze the prompt in deno server
+* use New Model (qwen/qwen3-30b-a3b) 
+* Optimize the search way
