@@ -13,6 +13,11 @@
 - `build_index.py`：对任意 epub 重新构建索引
 
 ## 快速使用
+基于 epub 建立 `chunks.jsonl` 等文件：
+```bash
+python build_index.py ./example.epub --out ./index_dir
+```
+
 在本目录下运行：
 ```bash
 python query.py "藏传佛教如何看待死亡" --topk 5

@@ -24,6 +24,23 @@ type InterceptorDetails = {
   };
 };
 
+type Source = {
+  rank: number;
+  score: number;
+  chunk: {
+    book_title: string;
+    author: string;
+    chapter_title: string;
+    chunk_index: number;
+    text: string;
+  };
+};
+
+type ResponseDetails = {
+  text?: string;
+  sources?: Source[];
+};
+
 type DeepChatElement = HTMLElement & {
   request?: {
     url: string;
@@ -31,6 +48,7 @@ type DeepChatElement = HTMLElement & {
     headers: Record<string, string>;
   };
   requestInterceptor?: (details: InterceptorDetails) => InterceptorDetails;
+  responseInterceptor?: (response: ResponseDetails) => ResponseDetails;
 };
 
 export function ChatClient({
@@ -70,6 +88,21 @@ export function ChatClient({
         messages: priorMessages,
       } as unknown as InterceptorDetails["body"];
       return details;
+    };
+    // Append source citations from the RAG response to the displayed text
+    el.responseInterceptor = (response: ResponseDetails) => {
+      if (!response.sources?.length) return response;
+
+      const citations = response.sources
+        .map(
+          (s) =>
+            `[${s.rank}] 《${s.chunk.book_title}》${s.chunk.chapter_title} (chunk#${s.chunk.chunk_index}, score ${s.score})`,
+        )
+        .join("\n");
+
+      return {
+        text: `${response.text ?? ""}\n\n---\n📚 引用来源：\n${citations}`,
+      };
     };
   }, [chatApiUrl, chatLib]);
 

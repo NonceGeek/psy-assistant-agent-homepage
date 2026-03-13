@@ -54,7 +54,7 @@ def parse_opf(zf):
     return title, author, spine_hrefs
 
 def html_to_blocks(html_bytes):
-    soup=BeautifulSoup(html_bytes, 'lxml')
+    soup=BeautifulSoup(html_bytes, 'html.parser')
     for tag in soup(['script','style']):
         tag.decompose()
     blocks=[]
@@ -70,7 +70,7 @@ def html_to_blocks(html_bytes):
     return blocks
 
 def extract_chapter_title(html_bytes):
-    soup=BeautifulSoup(html_bytes,'lxml')
+    soup=BeautifulSoup(html_bytes,'html.parser')
     for tag in soup(['script','style']):
         tag.decompose()
     for el in soup.find_all(['h1','h2','h3']):
