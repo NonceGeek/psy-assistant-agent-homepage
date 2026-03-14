@@ -96,7 +96,11 @@ type DeepChatElement = HTMLElement & {
   };
   requestInterceptor?: (details: InterceptorDetails) => InterceptorDetails;
   responseInterceptor?: (response: ResponseDetails) => ResponseDetails;
+  submitUserMessage?: (text: string) => void;
 };
+
+const MOOD_PROMPT = "今天心情怎么样？";
+const MOOD_BUTTONS = ["非常高兴", "开心", "平淡", "难过", "崩溃"];
 
 export function ChatClient({
   homepageName,
@@ -134,6 +138,11 @@ export function ChatClient({
   const clearChatHistory = useCallback(() => {
     localStorage.removeItem(HISTORY_KEY);
     window.location.reload();
+  }, []);
+
+  const sendMood = useCallback((text: string) => {
+    const el = chatRef.current;
+    if (el?.submitUserMessage) el.submitUserMessage("我今天感到" + text);
   }, []);
 
   useEffect(() => {
@@ -226,6 +235,22 @@ export function ChatClient({
               introMessage={{ text: chatbotIntroMessage }}
               history={initialHistory}
             />
+            <br></br>
+            <div className="mb-3 flex flex-wrap items-center justify-center gap-2">
+              <p className="text-sm text-muted-foreground shrink-0">{MOOD_PROMPT}</p>
+              <div className="flex flex-wrap gap-2">
+                {MOOD_BUTTONS.map((label) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => sendMood(label)}
+                    className="rounded-lg border border-border bg-muted/50 px-3 py-1.5 text-sm text-foreground transition-colors hover:bg-muted"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       </main>
