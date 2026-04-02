@@ -62,7 +62,7 @@ async function getEmbedding(text) {
   });
 }
 
-async function backfillEmbeddings(batchSize = 100) {
+async function backfillEmbeddings(batchSize = 10) {
   let totalProcessed = 0;
 
   while (true) {

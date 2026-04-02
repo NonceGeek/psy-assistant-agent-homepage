@@ -25,6 +25,9 @@ const OPENROUTER_KEY = Deno.env.get("API_KEY") || "";
 const CHAT_MODEL = "qwen/qwen3-30b-a3b";
 const EMBEDDING_MODEL = "qwen/qwen3-embedding-4b";
 const EMBEDDING_DIMENSIONS = 1024;
+/** OpenRouter has no /v1/audio/transcriptions; use chat completions + audio-input model (see docs/multimodal/audio). */
+const TRANSCRIPTION_MODEL =
+  Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || "openai/gpt-4o-audio-preview";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -140,7 +143,7 @@ class TfidfIndex {
     console.log(`  📚 TF-IDF index built: ${this.chunks.length} chunks, ${terms.length} terms`);
   }
 
-  query(queryText: string, topk = 5) {
+  query(queryText: string, topk = 10) {
     const ngrams = charNgrams(queryText, 2, 4);
     const qvec: SparseVec = new Map();
     for (const ng of ngrams) {
@@ -242,17 +245,120 @@ async function getQueryEmbedding(text: string): Promise<number[]> {
   return data.data[0].embedding;
 }
 
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const sub = bytes.subarray(i, i + CHUNK);
+    parts.push(String.fromCharCode.apply(null, sub as unknown as number[]));
+  }
+  return btoa(parts.join(""));
+}
+
+/** Map filename / MIME to OpenRouter input_audio format (lowercase extension). */
+function inferAudioFormat(filename: string, mimeType: string): string {
+  const lower = filename.toLowerCase();
+  const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
+  const allowed = new Set([
+    "wav",
+    "mp3",
+    "m4a",
+    "flac",
+    "ogg",
+    "aac",
+    "aiff",
+    "webm",
+    "pcm16",
+    "pcm24",
+  ]);
+  if (ext && allowed.has(ext)) return ext;
+  if (mimeType.includes("wav")) return "wav";
+  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "mp3";
+  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "m4a";
+  if (mimeType.includes("webm")) return "webm";
+  return "wav";
+}
+
+/**
+ * Cantonese audio via OpenRouter: chat completions + input_audio (not OpenAI Whisper multipart URL).
+ */
+async function transcribeCantoneseAudio(params: {
+  file: File;
+  filename?: string;
+  /** BCP-47 / Whisper-style hint; "yue" = Cantonese */
+  language?: string;
+  prompt?: string;
+  task?: "transcribe" | "translate";
+}): Promise<string> {
+  if (!OPENROUTER_KEY) throw new Error("API_KEY not configured");
+
+  const name = params.filename ?? params.file.name ?? "audio";
+  const buf = new Uint8Array(await params.file.arrayBuffer());
+  const base64Audio = uint8ArrayToBase64(buf);
+  const format = inferAudioFormat(name, params.file.type || "");
+
+  const lang = (params.language ?? "yue").trim().toLowerCase();
+  const task = params.task === "translate" ? "translate" : "transcribe";
+
+  let instruction =
+    task === "translate"
+      ? "Listen to this audio and translate the speech into clear English. Output only the English translation, no labels or commentary."
+      : lang === "yue" || lang === "zh-yue" || lang.includes("cantonese")
+      ? "Transcribe this audio. The speaker is using Cantonese (Yue Chinese). Output only the spoken words in appropriate Chinese characters (粵語口語書寫可). No commentary, no translation unless the speech mixes languages."
+      : `Transcribe this audio accurately. The primary language hint is: ${lang}. Output only the transcription text, no commentary.`;
+
+  if (params.prompt?.trim()) {
+    instruction += ` Additional context: ${params.prompt.trim()}`;
+  }
+
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENROUTER_KEY}`,
+    },
+    body: JSON.stringify({
+      model: TRANSCRIPTION_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: instruction },
+            {
+              type: "input_audio",
+              input_audio: {
+                data: base64Audio,
+                format,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`OpenRouter transcription ${resp.status}: ${err.slice(0, 2000)}`);
+  }
+
+  const data = await resp.json();
+  return data.choices?.[0]?.message?.content?.trim() ?? "";
+}
+
 type VectorResult = {
   id: number;
   embedding_input: string;
   similarity: number;
+  /** Returned when `match_lib_psy` selects `source_name` from the table */
+  source_name?: string | null;
 };
 
 // Requires a Supabase SQL function:
 //   match_lib_psy(query_embedding vector(1024), match_threshold float, match_count int)
 async function vectorSearch(
   query: string,
-  topk = 5,
+  topk = 10,
   threshold = 0.3,
 ): Promise<VectorResult[]> {
   if (!supabase) throw new Error("Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)");
@@ -363,13 +469,78 @@ router
       context.response.body = { error: String(err) };
     }
   })
+  .post("/api/trans_cantonese", async (context) => {
+    // Cantonese audio transcription/translation via OpenRouter chat + input_audio (see TRANSCRIPTION_MODEL).
+    // Request: multipart/form-data with:
+    // - file: audio file (required)
+    // - language: optional (default "yue")
+    // - prompt: optional
+    // - task: optional ("transcribe" | "translate")
+    try {
+      const body = context.request.body({ type: "form-data" });
+      // Oak default maxSize is 0 → all files go to Deno.makeTempDir() (fails on Deno Deploy: NotSupported: tmpdir).
+      // Set maxSize === maxFileSize so the whole upload stays in FormDataFile.content (in-memory only).
+      const maxAudioBytes = 25 * 1024 * 1024; // 25MB
+      const form = await body.value.read({
+        maxFileSize: maxAudioBytes,
+        maxSize: maxAudioBytes,
+      });
+
+      const fileField = form.files?.find((f) => f.name === "file") ?? form.files?.[0];
+      if (!fileField) {
+        context.response.status = 400;
+        context.response.body = { error: "multipart field 'file' is required" };
+        return;
+      }
+
+      // Oak may provide either a temporary filepath or raw content.
+      let fileBytes: Uint8Array;
+      if (fileField.content) {
+        fileBytes = fileField.content;
+      } else if (fileField.filename) {
+        // If Oak wrote a temp file, it is exposed as `filename`? (varies by Oak version/config).
+        // Prefer `tempfile` if present; otherwise try `filename` as a path.
+        const path = (fileField as unknown as { tempfile?: string }).tempfile ?? fileField.filename;
+        fileBytes = await Deno.readFile(path);
+      } else {
+        context.response.status = 400;
+        context.response.body = { error: "could not read uploaded file" };
+        return;
+      }
+
+      const filename = fileField.originalName ?? "audio";
+      const mimeType = fileField.contentType ?? "application/octet-stream";
+      // Ensure we pass an ArrayBuffer-backed BlobPart (avoid SharedArrayBuffer typing issues)
+      const arrayBuffer: ArrayBuffer = Uint8Array.from(fileBytes).buffer;
+      const file = new File([arrayBuffer], filename, { type: mimeType });
+
+      const languageRaw = form.fields?.language ?? "yue";
+      const prompt = form.fields?.prompt;
+      const taskRaw = form.fields?.task;
+      const task = taskRaw === "translate" ? "translate" : "transcribe";
+
+      const text = await transcribeCantoneseAudio({
+        file,
+        filename,
+        language: String(languageRaw || "").trim() || "yue",
+        prompt: prompt ? String(prompt) : undefined,
+        task,
+      });
+
+      context.response.body = { text };
+    } catch (err) {
+      console.error("trans_cantonese error:", err);
+      context.response.status = 500;
+      context.response.body = { error: String(err) };
+    }
+  })
   .get("/api/search", (context) => {
     // TF-IDF search endpoint
-    // Usage: GET /api/search?q=藏传佛教如何看待死亡&topk=5&lib=tfidf
+    // Usage: GET /api/search?q=藏传佛教如何看待死亡&topk=10&lib=tfidf
     const params = context.request.url.searchParams;
     const q = params.get("q") || "";
     const lib = params.get("lib") || "";
-    const topk = Math.min(Math.max(parseInt(params.get("topk") || "5", 10) || 5, 1), 50);
+    const topk = Math.min(Math.max(parseInt(params.get("topk") || "10", 10) || 10, 1), 50);
 
     if (!lib.trim()) {
       context.response.status = 400;
@@ -407,10 +578,10 @@ router
   })
   .get("/api/vector_search", async (context) => {
     // Supabase pgvector semantic search
-    // Usage: GET /api/vector_search?q=如何面对焦虑&topk=5
+    // Usage: GET /api/vector_search?q=如何面对焦虑&topk=10
     const params = context.request.url.searchParams;
     const q = params.get("q") || "";
-    const topk = Math.min(Math.max(parseInt(params.get("topk") || "5", 10) || 5, 1), 50);
+    const topk = Math.min(Math.max(parseInt(params.get("topk") || "10", 10) || 10, 1), 50);
 
     if (!q.trim()) {
       context.response.status = 400;
@@ -427,6 +598,7 @@ router
           rank: i + 1,
           similarity: +r.similarity.toFixed(4),
           text: r.embedding_input,
+          resource_name: r.source_name ?? undefined,
         })),
       };
     } catch (err) {
@@ -437,12 +609,14 @@ router
   })
   .post("/api/search_and_chat", async (context) => {
     // RAG endpoint: search for relevant chunks then ask the LLM
-    // Body: { q, lib, topk?, messages?, search_mode?: "tfidf" | "vector" }
+    // Body: { q, lib, topk?, messages?, search_mode?: "tfidf" | "vector", system_prompt?: string }
     const body = await context.request.body({ type: "json" }).value;
     const q: string = body.q || "";
     const lib: string = body.lib || "";
-    const topk: number = Math.min(Math.max(Number(body.topk) || 5, 1), 50);
+    const topk: number = Math.min(Math.max(Number(body.topk) || 10, 1), 50);
     const searchMode: string = body.search_mode || "tfidf";
+    const systemPromptParam: string | null =
+      body.system_prompt ?? body.systemPrompt ?? null;
 
     if (!q.trim()) {
       context.response.status = 400;
@@ -458,13 +632,15 @@ router
       if (searchMode === "vector") {
         // Supabase pgvector semantic search
         const results = await vectorSearch(q, topk);
+        console.log("results", results);
         sources = results.map((r, i) => ({
           rank: i + 1,
           score: +r.similarity.toFixed(4),
           text: r.embedding_input,
+          resource_name: r.source_name ?? undefined,
         }));
         contextChunks = results
-          .map((r, i) => `[vector result #${i + 1}, similarity ${r.similarity.toFixed(4)}]\n${r.embedding_input}`)
+          .map((r, i) => `[vector result #${i + 1}, similarity ${r.similarity.toFixed(4)}]\n${r.embedding_input}\nSource: ${r.source_name}`)
           .join("\n\n---\n\n");
         console.log("vector search results:", contextChunks);
       } else {
@@ -500,7 +676,7 @@ router
 
       // Step 2: build RAG messages
       // ! 可优化这个系统提示词，基于问题使用不同的「提示词模板」。
-      const systemPrompt = `
+      const defaultSystemPromptTemplate = `
       你是一个**专业心理咨询师**，当用户提出心理相关的问题时，你要用 **藏传佛教的世界观与心性观** 来理解与回应。
       
       在回答中，你需要：
@@ -520,18 +696,26 @@ router
          - 给出对用户有帮助，可立即实践的建议
       
       请注意，回答中无需给出参考资料。
-      
+      请注意，在回答中不要出现藏传佛教字样。
+      `;
+
+      const citations = `
       下面是可作为背景知识的资料：
-      
       【资料】
       ${contextChunks}
       `;
+
+      const systemPrompt =
+        systemPromptParam != null && String(systemPromptParam).trim() !== ""
+          ? String(systemPromptParam).trim()
+          : defaultSystemPromptTemplate;
 
       const priorMessages: Array<{ role: string; content: string }> =
         Array.isArray(body.messages) ? body.messages : [];
 
       const messages = [
         { role: "system", content: systemPrompt },
+        { role: "system", content: citations },
         ...priorMessages,
         { role: "user", content: q },
       ];

@@ -11,6 +11,9 @@ type Source = {
   rank: number;
   score: number;
   text?: string;
+  /** Vector RAG source label (e.g. book/source name); API may send `source` instead */
+  resource_name?: string;
+  source?: string;
   chunk?: {
     book_title: string;
     author: string;
@@ -46,9 +49,11 @@ function markdownToHtml(markdown: string): string {
 function buildCitationHtml(content: string, sources: Source[]): string {
   const citationItems = sources
     .map((s) => {
+      const resName = s.resource_name ?? s.source;
       const text = s.chunk
         ? `<strong>[${s.rank}] 《${s.chunk.book_title}》${s.chunk.chapter_title}</strong><br/>${s.chunk.text}`
-        : `<strong>[${s.rank}]</strong> ${s.text ?? ""}`;
+        : `<strong>[${s.rank}]</strong><br/>${s.text ?? ""} —— ${resName ? `${resName}` : ""}`;
+
       return `<div style="margin-bottom:8px;padding:6px 8px;background:rgba(0,0,0,0.03);border-radius:6px;font-size:0.85em;line-height:1.5">${text}</div>`;
     })
     .join("");
@@ -68,6 +73,8 @@ type ChatClientProps = {
   chatApiUrl: string;
   chatLib: string;
   searchMode: string;
+  /** When set, sent as system_prompt on the first user message only */
+  prompt1?: string | null;
 };
 
 type ChatMessage = {
@@ -97,10 +104,32 @@ type DeepChatElement = HTMLElement & {
   requestInterceptor?: (details: InterceptorDetails) => InterceptorDetails;
   responseInterceptor?: (response: ResponseDetails) => ResponseDetails;
   submitUserMessage?: (text: string) => void;
+  addMessage?: (message: { role?: string; text?: string; html?: string }, isUpdate?: boolean) => void;
 };
 
 const MOOD_PROMPT = "今天心情怎么样？";
 const MOOD_BUTTONS = ["非常高兴", "开心", "平淡", "难过", "崩溃"];
+
+const TAG_CSV_URL = "/tag_content.csv";
+const RANDOM_CHAT_SUFFIX = "\n\n 要进一步解析一下吗？";
+
+type TagRow = { tag: string; content: string };
+
+function parseTagCsv(csvText: string): TagRow[] {
+  const lines = csvText.trim().split(/\r?\n/);
+  const rows: TagRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const commaIdx = line.indexOf(",");
+    if (commaIdx >= 0) {
+      rows.push({
+        tag: line.slice(0, commaIdx).trim(),
+        content: line.slice(commaIdx + 1).trim(),
+      });
+    }
+  }
+  return rows;
+}
 
 export function ChatClient({
   homepageName,
@@ -109,6 +138,7 @@ export function ChatClient({
   chatApiUrl,
   chatLib,
   searchMode,
+  prompt1,
 }: ChatClientProps) {
   const chatRef = useRef<DeepChatElement | null>(null);
   const historyRef = useRef<HistoryMessage[]>([]);
@@ -116,6 +146,7 @@ export function ChatClient({
   const [initialHistory, setInitialHistory] = useState<
     Array<{ role: string; text?: string; html?: string }>
   >([]);
+  const [tagRows, setTagRows] = useState<TagRow[]>([]);
 
   // Load chat history from localStorage on mount, including citations for assistant messages
   useEffect(() => {
@@ -135,6 +166,14 @@ export function ChatClient({
     );
   }, []);
 
+  // Load tag_content.csv from public for "随便聊聊" button
+  useEffect(() => {
+    fetch(TAG_CSV_URL)
+      .then((r) => r.text())
+      .then((text) => setTagRows(parseTagCsv(text)))
+      .catch(() => setTagRows([]));
+  }, []);
+
   const clearChatHistory = useCallback(() => {
     localStorage.removeItem(HISTORY_KEY);
     window.location.reload();
@@ -144,6 +183,24 @@ export function ChatClient({
     const el = chatRef.current;
     if (el?.submitUserMessage) el.submitUserMessage("我今天感到" + text);
   }, []);
+
+  const sendRandomChat = useCallback(() => {
+    if (tagRows.length === 0) return;
+    const el = chatRef.current;
+    if (!el?.addMessage) return;
+    const row = tagRows[Math.floor(Math.random() * tagRows.length)];
+    const displayText = "【" + row.tag + "】" + row.content + RANDOM_CHAT_SUFFIX;
+    // Add user message (tag) and assistant message (content + suffix) directly — no API call
+    el.addMessage({ role: "user", text: row.tag }, false);
+    el.addMessage({ role: "ai", html: `<div class="markdown-body">${markdownToHtml(displayText)}</div>` }, false);
+    // Persist to history
+    historyRef.current = [
+      ...historyRef.current,
+      { role: "user", content: row.tag },
+      { role: "assistant", content: displayText },
+    ];
+    saveHistory(historyRef.current);
+  }, [tagRows]);
 
   useEffect(() => {
     const el = chatRef.current;
@@ -174,9 +231,14 @@ export function ChatClient({
       const payload: Record<string, unknown> = {
         q: currentQuestion,
         search_mode: searchMode,
-        topk: 5,
+        topk: 10,
         messages: priorMessages,
       };
+
+      // First talk: no prior messages in history — send prompt1 as system_prompt if configured
+      if (priorMessages.length === 0 && prompt1 != null && String(prompt1).trim() !== "") {
+        payload.system_prompt = String(prompt1).trim();
+      }
 
       // DO NOT REMOVE THIS CONSOLE.LOG
       console.log("payload", payload);
@@ -211,7 +273,7 @@ export function ChatClient({
       }
       return { html: buildCitationHtml(answerText, response.sources) };
     };
-  }, [chatApiUrl, chatLib, searchMode]);
+  }, [chatApiUrl, chatLib, searchMode, prompt1]);
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -227,11 +289,11 @@ export function ChatClient({
               🗑️ 清除记录
             </button>
           </div>
-          <p className="text-muted-foreground">{chatbotDescription}</p>
+          {/* <p className="text-muted-foreground">{chatbotDescription}</p> */}
           <div className="rounded-xl border border-border bg-card p-3 shadow-sm [&>deep-chat]:!w-full [&>deep-chat]:!block">
             <DeepChat
               ref={chatRef}
-              style={{ borderRadius: "12px", height: "560px" }}
+              style={{ borderRadius: "12px", height: "550px" }}
               introMessage={{ text: chatbotIntroMessage }}
               history={initialHistory}
             />
@@ -250,6 +312,16 @@ export function ChatClient({
                   </button>
                 ))}
               </div>
+            </div>
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={sendRandomChat}
+                disabled={tagRows.length === 0}
+                className="rounded-lg border border-border bg-muted/50 px-8 py-2 text-sm text-foreground transition-colors hover:bg-muted disabled:opacity-50 min-w-[12rem]"
+              >
+                👉&nbsp;&nbsp;随便聊聊&nbsp;&nbsp;👈
+              </button>
             </div>
           </div>
         </div>

@@ -115,14 +115,14 @@ TF-IDF full-text search over a knowledge library. The server auto-discovers all 
 |-------|------|----------|---------|-------------|
 | `q` | string | Yes | — | Search query |
 | `lib` | string | Yes | — | Library name (maps to `data_<lib>/chunks.jsonl`) |
-| `topk` | number | No | `5` | Number of top results to return (1–50) |
+| `topk` | number | No | `10` | Number of top results to return (1–50) |
 
 **Success Response (200):**
 ```json
 {
   "query": "藏传佛教如何看待死亡",
   "lib": "tfidf",
-  "topk": 5,
+  "topk": 10,
   "total_chunks": 137,
   "results": [
     {
@@ -158,7 +158,7 @@ TF-IDF full-text search over a knowledge library. The server auto-discovers all 
 
 **Example:**
 ```bash
-curl "http://localhost:4403/api/search?lib=tfidf&q=藏传佛教如何看待死亡&topk=5"
+curl "http://localhost:4403/api/search?lib=tfidf&q=藏传佛教如何看待死亡&topk=10"
 ```
 
 ---
@@ -172,13 +172,13 @@ Semantic search using Supabase pgvector embeddings (requires `SUPABASE_URL`, `SU
 | Param | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `q` | string | Yes | — | Search query |
-| `topk` | number | No | `5` | Number of top results to return (1–50) |
+| `topk` | number | No | `10` | Number of top results to return (1–50) |
 
 **Success Response (200):**
 ```json
 {
   "query": "如何面对焦虑",
-  "topk": 5,
+  "topk": 10,
   "results": [
     {
       "rank": 1,
@@ -191,7 +191,7 @@ Semantic search using Supabase pgvector embeddings (requires `SUPABASE_URL`, `SU
 
 **Example:**
 ```bash
-curl "http://localhost:4403/api/vector_search?q=如何面对焦虑&topk=5"
+curl "http://localhost:4403/api/vector_search?q=如何面对焦虑&topk=10"
 ```
 
 ---
@@ -212,9 +212,10 @@ Supports two retrieval backends via `search_mode`:
 {
   "q": "藏传佛教如何看待死亡",
   "lib": "tfidf",
-  "topk": 5,
+  "topk": 10,
   "messages": [],
-  "search_mode": "tfidf"
+  "search_mode": "tfidf",
+  "system_prompt": null
 }
 ```
 
@@ -223,8 +224,9 @@ Supports two retrieval backends via `search_mode`:
 | `q` | string | Yes | — | User question |
 | `search_mode` | string | No | `"tfidf"` | Retrieval backend: `"tfidf"` or `"vector"` |
 | `lib` | string | Conditional | — | Library name (required when `search_mode` is `"tfidf"`) |
-| `topk` | number | No | `5` | Number of chunks to retrieve (1–50) |
+| `topk` | number | No | `10` | Number of chunks to retrieve (1–50) |
 | `messages` | array | No | `[]` | Prior conversation messages for multi-turn context. Each has `role` and `content`. |
+| `system_prompt` | string | No | (built-in RAG prompt) | Override system prompt; when null or omitted, server uses default RAG system prompt with context. |
 
 **Success Response — TF-IDF mode (200):**
 ```json
@@ -270,24 +272,25 @@ Supports two retrieval backends via `search_mode`:
 ```bash
 curl -X POST http://localhost:4403/api/search_and_chat \
   -H "Content-Type: application/json" \
-  -d '{"q": "藏传佛教如何看待死亡", "lib": "tfidf", "topk": 5}'
+  -d '{"q": "藏传佛教如何看待死亡", "lib": "tfidf", "topk": 10}'
 ```
 
 **Example — Vector mode:**
 ```bash
 curl -X POST http://localhost:4403/api/search_and_chat \
   -H "Content-Type: application/json" \
-  -d '{"q": "如何面对焦虑", "search_mode": "vector", "topk": 5}'
+  -d '{"q": "如何面对焦虑", "search_mode": "vector", "topk": 10}'
 ```
 
-**Example — Vector mode with multi-turn context:**
+**Example — Vector mode with multi-turn context and custom system prompt:**
 ```bash
 curl -X POST http://localhost:4403/api/search_and_chat \
   -H "Content-Type: application/json" \
   -d '{
     "q": "那具体应该怎么做呢",
     "search_mode": "vector",
-    "topk": 5,
+    "topk": 10,
+    "system_prompt": "你是专业心理咨询师，用共情与接纳回应用户，并给出可实践的建议。",
     "messages": [
       {"role": "user", "content": "如何面对焦虑"},
       {"role": "assistant", "content": "面对焦虑时，可以尝试……"}
@@ -297,11 +300,47 @@ curl -X POST http://localhost:4403/api/search_and_chat \
 
 ---
 
+### `POST /api/trans_cantonese`
+
+Transcribe (or translate) uploaded audio using **OpenRouter chat completions** with `input_audio` (OpenRouter does **not** proxy OpenAI’s `/v1/audio/transcriptions`; Whisper multipart is not used here).
+
+**Request:** `multipart/form-data`
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `file` | Yes | — | **WAV or MP3** are sent directly to OpenAI. **M4A / AAC / MP4 / FLAC / OGG / WebM** are converted to MP3 **in memory** with **ffmpeg** if `ffmpeg` is on `PATH` (or `FFMPEG_PATH`). Without ffmpeg, upload WAV/MP3 only. |
+| `language` | No | `yue` | Language hint (e.g. `yue` for Cantonese) |
+| `prompt` | No | — | Extra instructions for the model |
+| `task` | No | `transcribe` | `transcribe` or `translate` (to English) |
+
+**Success (200):** `{ "text": "..." }`
+
+**Example:**
+
+```bash
+curl -X POST "http://localhost:4403/api/trans_cantonese" \
+  -F "file=@./recording.m4a" \
+  -F "language=yue" \
+  -F "task=transcribe"
+```
+
+Default transcription model: `openai/gpt-4o-audio-preview`. Override with env `OPENROUTER_TRANSCRIPTION_MODEL`.
+
+**Notes:**
+
+- Uploads are parsed **in memory** (up to 25MB) so the handler works on hosts where `Deno.makeTempDir()` is unavailable.
+- OpenAI’s `input_audio` only allows `format`: `wav` | `mp3`. M4A etc. require **ffmpeg** for server-side conversion (stdin/stdout, no temp files).
+- Optional env **`FFMPEG_PATH`**: path to `ffmpeg` binary if not on `PATH`.
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `API_KEY` | Yes | — | OpenRouter API key for chat, embeddings, and RAG endpoints |
+| `OPENROUTER_TRANSCRIPTION_MODEL` | No | `openai/gpt-4o-audio-preview` | Model for `/api/trans_cantonese` (must support audio input on OpenRouter) |
+| `FFMPEG_PATH` | No | `ffmpeg` on PATH | Used to convert m4a/aac/… → mp3 in memory when file is not WAV/MP3 |
 | `SUPABASE_URL` | No | — | Supabase project URL (required for vector search) |
 | `SUPABASE_SERVICE_ROLE_KEY` | No | — | Supabase service-role key (required for vector search) |
 | `SERVER_PORT` | No | `4403` | Server listen port |

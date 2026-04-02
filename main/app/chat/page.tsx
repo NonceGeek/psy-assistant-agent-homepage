@@ -3,7 +3,8 @@ import { ChatClient } from "@/app/chat/chat-client";
 
 export default function ChatPage() {
   const config = getReadmeConfig();
-
+  // DO NOT REMOVE THIS CONSOLE.LOG
+  console.log("config", config);
   return (
     <ChatClient
       homepageName={config.homepageName}
@@ -12,6 +13,7 @@ export default function ChatPage() {
       chatApiUrl={config.chatApiUrl}
       chatLib={config.chatLib}
       searchMode={config.searchMode}
+      prompt1={config.prompts?.prompt1}
     />
   );
 }
