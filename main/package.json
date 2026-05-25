@@ -12,8 +12,7 @@
     "agentTags": ["Coder", "Web3er"],
     "premiumTierDescription": "For Example, you could submit the prompt like that:\n 例如，你可以像这样提交你的 Prompt：\n「Generate an online letter for my fans and record the number of visits, and deploy it to my domain: https://letter.leeduckgo.com.」\n💡微信扫码进一步沟通：\n![my_qr_code](https://dimsum-utils.oss-cn-guangzhou.aliyuncs.com/leeduckgo/qr_code2.png)\n或者给我发送私信：[https://x.com/0xleeduckgo](https://x.com/0xleeduckgo)",
     "chatbotDescription": "Talk to LeanCoder if you have any questions about programming.",
-    "chatbotIntroMessage": "你好！我是 LeanCoder轻量级程序编写大师~ 你有什么问题都可以问我哦~",
-    "chatApiUrl": "https://api.scaffold-agent-homepage.leeduckgo.com/api/chat"
+    "chatbotIntroMessage": "你好！我是 LeanCoder轻量级程序编写大师~ 你有什么问题都可以问我哦~"
   },
   "version": "0.1.0",
   "private": true,

@@ -193,6 +193,13 @@ async function loadAllIndices() {
   }
 }
 
+let tfidfLoadPromise: Promise<void> | null = null;
+async function ensureTfidfLoaded() {
+  if (tfidfIndices.size > 0) return;
+  if (!tfidfLoadPromise) tfidfLoadPromise = loadAllIndices();
+  await tfidfLoadPromise;
+}
+
 // ---------------------------------------------------------------------------
 // Shared helpers — OpenRouter LLM + embeddings, Supabase vector search
 // ---------------------------------------------------------------------------
@@ -304,8 +311,8 @@ async function transcribeCantoneseAudio(params: {
     task === "translate"
       ? "Listen to this audio and translate the speech into clear English. Output only the English translation, no labels or commentary."
       : lang === "yue" || lang === "zh-yue" || lang.includes("cantonese")
-      ? "Transcribe this audio. The speaker is using Cantonese (Yue Chinese). Output only the spoken words in appropriate Chinese characters (粵語口語書寫可). No commentary, no translation unless the speech mixes languages."
-      : `Transcribe this audio accurately. The primary language hint is: ${lang}. Output only the transcription text, no commentary.`;
+        ? "Transcribe this audio. The speaker is using Cantonese (Yue Chinese). Output only the spoken words in appropriate Chinese characters (粵語口語書寫可). No commentary, no translation unless the speech mixes languages."
+        : `Transcribe this audio accurately. The primary language hint is: ${lang}. Output only the transcription text, no commentary.`;
 
   if (params.prompt?.trim()) {
     instruction += ` Additional context: ${params.prompt.trim()}`;
@@ -350,21 +357,29 @@ type VectorResult = {
   id: number;
   embedding_input: string;
   similarity: number;
-  /** Returned when `match_lib_psy` selects `source_name` from the table */
+  /** Returned when `match_lib_*` selects `source_name` from the table */
   source_name?: string | null;
 };
 
-// Requires a Supabase SQL function:
+// Requires a Supabase SQL function per lib, e.g.:
 //   match_lib_psy(query_embedding vector(1024), match_threshold float, match_count int)
 async function vectorSearch(
   query: string,
   topk = 10,
+  lib = "psy",
   threshold = 0.3,
 ): Promise<VectorResult[]> {
   if (!supabase) throw new Error("Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)");
 
+  const libName = lib.trim() || "psy";
+  if (!/^[a-zA-Z0-9_]+$/.test(libName)) {
+    throw new Error(`invalid lib "${libName}": use letters, digits, or underscores only`);
+  }
+
+  const rpcName = `match_lib_${libName}`;
+  console.log("rpcName:", rpcName);
   const embedding = await getQueryEmbedding(query);
-  const { data, error } = await supabase.rpc("match_lib_psy", {
+  const { data, error } = await supabase.rpc(rpcName, {
     query_embedding: embedding,
     match_threshold: threshold,
     match_count: topk,
@@ -388,6 +403,127 @@ async function vectorSearch(
 //   return true;
 // }
 
+/** `?doc=name` → `./name.md`; omit → `./apidoc.md`. Basename only; rejects path segments. */
+function resolveDocFile(
+  params: URLSearchParams,
+): { ok: true; filePath: string; title: string } | { ok: false; error: string } {
+  const raw = (params.get("doc") || "").trim();
+  let stem: string;
+  if (!raw) {
+    stem = "apidoc";
+  } else {
+    const base = raw.replace(/\\/g, "/").split("/").pop() || "";
+    let s = base;
+    if (s.toLowerCase().endsWith(".md")) s = s.slice(0, -3);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(s)) {
+      return {
+        ok: false,
+        error:
+          "invalid 'doc' parameter: use a single basename (letters, digits, . _ -), no paths",
+      };
+    }
+    stem = s;
+  }
+  return { ok: true, filePath: `./${stem}.md`, title: stem };
+}
+
+// Built-in RAG system prompts for /api/search_and_chat (select by index via system_prompt)
+const DEFAULT_SYSTEM_PROMPT_TEMPLATES: string[] = [
+  `
+      你是一个**专业心理咨询师**，当用户提出心理相关的问题时，你要用 **藏传佛教的世界观与心性观** 来理解与回应。
+      
+      在回答中，你需要：
+      
+      1. 以**藏传佛教的思维方式**来审视和解读问题，如：
+         - 生命无常与痛苦的缘起性空
+         - 对“心”的觉察与自性清净的理解
+         - 通过慈悲、觉知、止观等方法引导用户自我觉醒与解脱  
+         - 内在烦恼（贪嗔痴）不是个人失败，而是感受与知见的构造物，需要智慧去观察和了解  [oai_citation:0‡维基百科](https://zh.wikipedia.org/wiki/%E6%85%88_%28%E4%BD%9B%E6%95%99%29?utm_source=chatgpt.com)
+      
+      2. 在专业心理咨询框架下提供支持与引导：
+         - 先用**共情与接纳**回应用户的感受
+         - 结合藏传佛教及心理学（如正念觉察、观照习气等）给出**具体的实践建议**
+      
+      3. 尊重用户信仰与判断，不强加宗教观点：
+         - 以佛法智慧辅助理解，而不是灌输宗教教义
+         - 给出对用户有帮助，可立即实践的建议
+      
+      请注意，回答中无需给出参考资料。
+      请注意，在回答中不要出现藏传佛教字样。
+      `,
+  `
+    你是一个**专业心理咨询师**，当用户提出心理相关的问题时，你要用 **道教的世界观与心性观** 来理解与回应。
+
+    在回答中，你需要：
+
+    1. 以**道教的思维方式**来审视和解读问题，如：
+       - 顺应自然、因势利导，理解人生变化中的无常与流动
+       - 以“道法自然”的视角看待痛苦、焦虑与执着，帮助用户从过度控制中松开
+       - 通过清静、守中、观心、调息、养神等方法，引导用户回到内在平衡
+       - 内在烦恼不是个人失败，而是身心失衡、欲念牵引、心神外驰所形成的状态，需要通过觉察、涵养与顺势调整来化解
+       - 以“无为而无不为”的智慧，帮助用户减少对抗，找到更自然、更省力的行动方式
+
+    2. 在专业心理咨询框架下提供支持与引导：
+       - 先用**共情与接纳**回应用户的感受
+      - 结合道家智慧及心理学方法，如正念觉察、情绪调节、身体感知、认知松动、习惯观察等，给出**具体的实践建议**
+      - 鼓励用户观察自己的情绪、念头、身体反应与行为模式，而不是急于评判或压制它们
+      - 帮助用户区分“真正需要处理的问题”和“由执着、恐惧、过度用力产生的内耗”
+
+    3. 尊重用户信仰与判断，不强加宗教观点：
+      - 以道家智慧辅助理解，而不是灌输宗教教义
+      - 使用温和、开放、非评判的语言
+      - 给出对用户有帮助、可立即实践的建议
+      - 当用户的问题涉及严重心理危机、自伤风险或现实安全问题时，应优先提供安全支持，并建议寻求专业心理咨询、医疗或紧急帮助
+
+    请注意，回答中无需给出参考资料。  
+    请注意，在回答中不要出现“道教”或“道家”字样。
+  `
+  ,
+  `
+      你是专业心理咨询师。先用共情与接纳回应用户的感受，再结合检索到的背景资料给出具体、可立即实践的建议。
+      回答中无需列出参考资料。
+      `,
+];
+
+function resolveSystemPrompt(
+  param: unknown,
+  templates: string[] = DEFAULT_SYSTEM_PROMPT_TEMPLATES,
+):
+  | { ok: true; prompt: string; templateIndex: number | null }
+  | { ok: false; error: string } {
+  if (templates.length === 0) {
+    return { ok: false, error: "no system prompt templates configured" };
+  }
+
+  if (param == null || param === "") {
+    return { ok: true, prompt: templates[0].trim(), templateIndex: 0 };
+  }
+
+  let index: number | null = null;
+  if (typeof param === "number" && Number.isInteger(param)) {
+    index = param;
+  } else {
+    const s = String(param).trim();
+    if (s === "") {
+      return { ok: true, prompt: templates[0].trim(), templateIndex: 0 };
+    }
+    if (/^\d+$/.test(s)) index = parseInt(s, 10);
+    else return { ok: true, prompt: s, templateIndex: null };
+  }
+
+  if (index !== null) {
+    if (index < 0 || index >= templates.length) {
+      return {
+        ok: false,
+        error: `system_prompt index ${index} out of range (0–${templates.length - 1})`,
+      };
+    }
+    return { ok: true, prompt: templates[index].trim(), templateIndex: index };
+  }
+
+  return { ok: true, prompt: String(param).trim(), templateIndex: null };
+}
+
 // Initialize router
 const router = new Router();
 
@@ -404,19 +540,36 @@ router
     };
   })
   .get("/docs", async (context) => {
+    const spec = resolveDocFile(context.request.url.searchParams);
+    if (!spec.ok) {
+      context.response.status = 400;
+      context.response.body = { error: spec.error };
+      return;
+    }
     try {
-      const readmeText = await Deno.readTextFile("./apidoc.md");
+      const readmeText = await Deno.readTextFile(spec.filePath);
+      context.response.headers.set("Content-Type", "text/markdown; charset=utf-8");
       context.response.body = readmeText;
     } catch (err) {
-      console.error("Error reading README:", err);
+      if (err instanceof Deno.errors.NotFound) {
+        context.response.status = 404;
+        context.response.body = { error: "documentation file not found", doc: spec.title };
+        return;
+      }
+      console.error("Error reading doc:", err);
       context.response.status = 500;
       context.response.body = { error: "Could not load documentation" };
     }
   })
   .get("/docs/html", async (context) => {
+    const spec = resolveDocFile(context.request.url.searchParams);
+    if (!spec.ok) {
+      context.response.status = 400;
+      context.response.body = { error: spec.error };
+      return;
+    }
     try {
-      // Read README.md file
-      const readmeText = await Deno.readTextFile("./apidoc.md");
+      const readmeText = await Deno.readTextFile(spec.filePath);
 
       // Render markdown to HTML with GFM styles
       const body = render(readmeText);
@@ -427,7 +580,7 @@ router
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>TaiShang AI Agent Market API Documentation</title>
+      <title>${spec.title} — API Documentation</title>
       <style>
         ${CSS}
         body {
@@ -446,7 +599,12 @@ router
       context.response.headers.set("Content-Type", "text/html; charset=utf-8");
       context.response.body = html;
     } catch (err) {
-      console.error("Error reading README:", err);
+      if (err instanceof Deno.errors.NotFound) {
+        context.response.status = 404;
+        context.response.body = { error: "documentation file not found", doc: spec.title };
+        return;
+      }
+      console.error("Error reading doc:", err);
       context.response.status = 500;
       context.response.body = { error: "Could not load documentation" };
     }
@@ -534,9 +692,10 @@ router
       context.response.body = { error: String(err) };
     }
   })
-  .get("/api/search", (context) => {
+  .get("/api/search", async (context) => {
     // TF-IDF search endpoint
     // Usage: GET /api/search?q=藏传佛教如何看待死亡&topk=10&lib=tfidf
+    await ensureTfidfLoaded();
     const params = context.request.url.searchParams;
     const q = params.get("q") || "";
     const lib = params.get("lib") || "";
@@ -578,9 +737,10 @@ router
   })
   .get("/api/vector_search", async (context) => {
     // Supabase pgvector semantic search
-    // Usage: GET /api/vector_search?q=如何面对焦虑&topk=10
+    // Usage: GET /api/vector_search?q=如何面对焦虑&topk=10&lib=psy
     const params = context.request.url.searchParams;
     const q = params.get("q") || "";
+    const lib = (params.get("lib") || "psy").trim();
     const topk = Math.min(Math.max(parseInt(params.get("topk") || "10", 10) || 10, 1), 50);
 
     if (!q.trim()) {
@@ -590,9 +750,10 @@ router
     }
 
     try {
-      const results = await vectorSearch(q, topk);
+      const results = await vectorSearch(q, topk, lib);
       context.response.body = {
         query: q,
+        lib,
         topk,
         results: results.map((r, i) => ({
           rank: i + 1,
@@ -607,15 +768,33 @@ router
       context.response.body = { error: String(err) };
     }
   })
+  /*
+
+    # default template [0]
+    curl -X POST http://localhost:8000/api/search_and_chat \
+      -H "Content-Type: application/json" \
+      -d '{"q": "如何面对焦虑", "search_mode": "vector"}'
+    # built-in template [1]
+    curl -X POST http://localhost:8000/api/search_and_chat \
+      -H "Content-Type: application/json" \
+      -d '{"q": "如何面对焦虑", "search_mode": "vector", "lib": "dao", "system_prompt": 1}'
+    # custom string (unchanged 8000)
+    curl -X POST http://localhost:4403/api/search_and_chat \
+      -H "Content-Type: application/json" \
+      -d '{"q": "如何面对焦虑", "system_prompt": "你是专业心理咨询师……"}'
+
+  */
   .post("/api/search_and_chat", async (context) => {
     // RAG endpoint: search for relevant chunks then ask the LLM
-    // Body: { q, lib, topk?, messages?, search_mode?: "tfidf" | "vector", system_prompt?: string }
+    // Body: { q, lib?, topk?, messages?, search_mode?: "tfidf" | "vector", system_prompt?: string | number }
     const body = await context.request.body({ type: "json" }).value;
     const q: string = body.q || "";
-    const lib: string = body.lib || "";
     const topk: number = Math.min(Math.max(Number(body.topk) || 10, 1), 50);
     const searchMode: string = body.search_mode || "tfidf";
-    const systemPromptParam: string | null =
+    const lib: string = String(
+      body.lib ?? (searchMode === "vector" ? "psy" : ""),
+    ).trim();
+    const systemPromptParam: unknown =
       body.system_prompt ?? body.systemPrompt ?? null;
 
     if (!q.trim()) {
@@ -630,8 +809,9 @@ router
       let sources: unknown[];
 
       if (searchMode === "vector") {
-        // Supabase pgvector semantic search
-        const results = await vectorSearch(q, topk);
+        console.log("vector way search");
+        // Supabase pgvector semantic search (lib defaults to "psy")
+        const results = await vectorSearch(q, topk, lib);
         console.log("results", results);
         sources = results.map((r, i) => ({
           rank: i + 1,
@@ -644,7 +824,9 @@ router
           .join("\n\n---\n\n");
         console.log("vector search results:", contextChunks);
       } else {
+        console.log("tfidf way search");
         // TF-IDF sparse search (requires lib)
+        await ensureTfidfLoaded();
         if (!lib.trim()) {
           context.response.status = 400;
           context.response.body = {
@@ -675,40 +857,24 @@ router
       }
 
       // Step 2: build RAG messages
-      // ! 可优化这个系统提示词，基于问题使用不同的「提示词模板」。
-      const defaultSystemPromptTemplate = `
-      你是一个**专业心理咨询师**，当用户提出心理相关的问题时，你要用 **藏传佛教的世界观与心性观** 来理解与回应。
-      
-      在回答中，你需要：
-      
-      1. 以**藏传佛教的思维方式**来审视和解读问题，如：
-         - 生命无常与痛苦的缘起性空
-         - 对“心”的觉察与自性清净的理解
-         - 通过慈悲、觉知、止观等方法引导用户自我觉醒与解脱  
-         - 内在烦恼（贪嗔痴）不是个人失败，而是感受与知见的构造物，需要智慧去观察和了解  [oai_citation:0‡维基百科](https://zh.wikipedia.org/wiki/%E6%85%88_%28%E4%BD%9B%E6%95%99%29?utm_source=chatgpt.com)
-      
-      2. 在专业心理咨询框架下提供支持与引导：
-         - 先用**共情与接纳**回应用户的感受
-         - 结合藏传佛教及心理学（如正念觉察、观照习气等）给出**具体的实践建议**
-      
-      3. 尊重用户信仰与判断，不强加宗教观点：
-         - 以佛法智慧辅助理解，而不是灌输宗教教义
-         - 给出对用户有帮助，可立即实践的建议
-      
-      请注意，回答中无需给出参考资料。
-      请注意，在回答中不要出现藏传佛教字样。
-      `;
+      const promptResolved = resolveSystemPrompt(systemPromptParam);
+      if (!promptResolved.ok) {
+        context.response.status = 400;
+        context.response.body = {
+          error: promptResolved.error,
+          available_templates: DEFAULT_SYSTEM_PROMPT_TEMPLATES.length,
+        };
+        return;
+      }
+      const systemPrompt = promptResolved.prompt;
+
+      console.log("systemPrompt:", systemPrompt);
 
       const citations = `
       下面是可作为背景知识的资料：
       【资料】
       ${contextChunks}
       `;
-
-      const systemPrompt =
-        systemPromptParam != null && String(systemPromptParam).trim() !== ""
-          ? String(systemPromptParam).trim()
-          : defaultSystemPromptTemplate;
 
       const priorMessages: Array<{ role: string; content: string }> =
         Array.isArray(body.messages) ? body.messages : [];
@@ -725,9 +891,95 @@ router
       // Step 3: call LLM via OpenRouter
       const text = await callLLM(messages);
 
-      context.response.body = { text, sources };
+      context.response.body = {
+        text,
+        sources,
+        ...(promptResolved.templateIndex !== null
+          ? { system_prompt_template_index: promptResolved.templateIndex }
+          : {}),
+      };
     } catch (err) {
       console.error("search_and_chat error:", err);
+      context.response.status = 500;
+      context.response.body = { error: String(err) };
+    }
+  })
+  .post("/api/new_cert", async (context) => {
+    // Create a new certificate record in agent_lib_cert_master.
+    // Body: { passwd, owner, cert_name }
+    const body = await context.request.body({ type: "json" }).value;
+    const { passwd, owner, cert_name } = body;
+
+    const expectedPasswd = Deno.env.get("PASSWD") || "";
+    if (!passwd || passwd !== expectedPasswd) {
+      context.response.status = 401;
+      context.response.body = { error: "Unauthorized: invalid passwd" };
+      return;
+    }
+
+    if (!owner?.trim() || !cert_name?.trim()) {
+      context.response.status = 400;
+      context.response.body = { error: "'owner' and 'cert_name' are required" };
+      return;
+    }
+
+    if (!supabase) {
+      context.response.status = 500;
+      context.response.body = { error: "Supabase not configured" };
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from("agent_lib_cert_master")
+        .insert({ owner: owner.trim(), cert_name: cert_name.trim() })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      context.response.body = { success: true, data };
+    } catch (err) {
+      console.error("new_cert error:", err);
+      context.response.status = 500;
+      context.response.body = { error: String(err) };
+    }
+  })
+  .get("/api/verify_cert", async (context) => {
+    // Verify cert by query param cert_id (row id in agent_lib_cert_master).
+    const params = context.request.url.searchParams;
+    const certId = (params.get("cert_id") || "").trim();
+
+    if (!certId) {
+      context.response.status = 400;
+      context.response.body = { error: "query parameter 'cert_id' is required" };
+      return;
+    }
+
+    if (!supabase) {
+      context.response.status = 500;
+      context.response.body = { error: "Supabase not configured" };
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from("agent_lib_cert_master")
+        .select("*")
+        .eq("cert_id", certId)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (!data) {
+        context.response.status = 404;
+        context.response.body = { error: "certificate not found", cert_id: certId };
+        return;
+      }
+
+      context.response.body = { valid: true, cert: data };
+    } catch (err) {
+      console.error("verify_cert error:", err);
       context.response.status = 500;
       context.response.body = { error: String(err) };
     }
@@ -759,21 +1011,31 @@ app.use(async (context, next) => {
 });
 
 // Enable CORS for All Routes
-app.use(oakCors()); 
+app.use(oakCors());
 
 // Middleware: Router
 app.use(router.routes());
 
-// Scan all data_* folders and build TF-IDF indices
-await loadAllIndices();
-
 // Start server
-const port = Number(Deno.env.get("SERVER_PORT")) || 4403;
+const port = 8000;
 
-console.info(`
+const isDeploy =
+  Boolean(Deno.env.get("DENO_DEPLOYMENT_ID")) || Boolean(Deno.env.get("DENO_REGION"));
+
+if (isDeploy) {
+  console.info(`🚀 Server started (Deno Deploy)`);
+  Deno.serve({
+    handler: async (req) => {
+      const resp = await app.handle(req);
+      return resp ?? new Response("Not Found", { status: 404 });
+    },
+  });
+} else {
+  console.info(`
   🚀 CORS-enabled web server listening on port ${port}
   
   🌐 Visit: http://localhost:${port}
   `);
 
-await app.listen({ port });
+  await app.listen({ port });
+}

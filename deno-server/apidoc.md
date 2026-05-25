@@ -1,7 +1,7 @@
 # Scaffold Agent Homepage — API Documentation
 
-> Deno backend server providing chat, TF-IDF search, vector search (Supabase pgvector), and RAG endpoints.
-> LLM & embeddings powered by OpenRouter.
+> Deno backend server providing chat, TF-IDF search, vector search (Supabase pgvector), RAG endpoints, Cantonese audio transcription, and certificate helpers (`agent_lib_cert_master`).
+> LLM & embeddings powered by OpenRouter (`qwen/qwen3-30b-a3b` chat, `qwen/qwen3-embedding-4b` embeddings, 1024 dimensions).
 
 ## Base URL
 
@@ -17,11 +17,7 @@ http://localhost:4403
 
 Server greeting.
 
-**Response:**
-```
-Hello from Movement x402 Server!
-Pay-to address: <MOVEMENT_PAY_TO>
-```
+**Response:** Plain text greeting, e.g. `Hello from Psy ChatBot Server`.
 
 ---
 
@@ -43,15 +39,39 @@ Health check endpoint for monitoring and load balancers.
 
 Get API documentation in Markdown format.
 
-**Response:** Raw Markdown content of this documentation.
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `doc` | string | No | `apidoc` | Basename of a `.md` file in the server working directory (e.g. `whitepaper` → `./whitepaper.md`). Single segment only: letters, digits, `.`, `_`, `-`; no path separators. |
+
+**Response:** Raw Markdown file content (`text/markdown`).
+
+**Error Responses:**
+
+- `400` — Invalid `doc` parameter
+- `404` — File not found
+- `500` — Could not read file
+
+**Examples:**
+```bash
+curl "http://localhost:4403/docs"
+curl "http://localhost:4403/docs?doc=whitepaper"
+```
 
 ---
 
 ### `GET /docs/html`
 
-Get API documentation rendered as HTML with GitHub Flavored Markdown styling.
+Get API documentation rendered as HTML with GitHub Flavored Markdown styling. Same `doc` query parameter as `GET /docs`.
 
 **Response:** HTML page with rendered documentation.
+
+**Examples:**
+```bash
+curl "http://localhost:4403/docs/html"
+curl "http://localhost:4403/docs/html?doc=apidoc"
+```
 
 ---
 
@@ -165,33 +185,43 @@ curl "http://localhost:4403/api/search?lib=tfidf&q=藏传佛教如何看待死�
 
 ### `GET /api/vector_search`
 
-Semantic search using Supabase pgvector embeddings (requires `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and the `match_agent_lib_psy` SQL function).
+Semantic search using Supabase pgvector embeddings. Each `lib` maps to a Supabase RPC `match_lib_<lib>` (e.g. `match_lib_psy`) and table `agent_lib_<lib>` (e.g. `agent_lib_psy`). Requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
 **Query Parameters:**
 
 | Param | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `q` | string | Yes | — | Search query |
+| `lib` | string | No | `psy` | Vector library name (letters, digits, underscores only) |
 | `topk` | number | No | `10` | Number of top results to return (1–50) |
 
 **Success Response (200):**
 ```json
 {
   "query": "如何面对焦虑",
+  "lib": "psy",
   "topk": 10,
   "results": [
     {
       "rank": 1,
       "similarity": 0.8234,
-      "text": "..."
+      "text": "...",
+      "resource_name": "source-file-name"
     }
   ]
 }
 ```
 
+| Result field | Description |
+|--------------|-------------|
+| `similarity` | Cosine similarity from pgvector RPC |
+| `text` | Matched chunk text (`embedding_input`) |
+| `resource_name` | Optional source label from the table |
+
 **Example:**
 ```bash
 curl "http://localhost:4403/api/vector_search?q=如何面对焦虑&topk=10"
+curl "http://localhost:4403/api/vector_search?q=如何定心安神&lib=dao&topk=10"
 ```
 
 ---
@@ -202,10 +232,12 @@ RAG (Retrieval-Augmented Generation) endpoint. Retrieves relevant context via TF
 
 Supports two retrieval backends via `search_mode`:
 
-| Mode | Backend | Requires |
-|------|---------|----------|
-| `"tfidf"` (default) | In-memory TF-IDF sparse search | `lib` parameter + `data_<lib>/chunks.jsonl` |
-| `"vector"` | Supabase pgvector semantic search | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `match_agent_lib_psy` SQL function |
+| Mode | Backend | `lib` behavior |
+|------|---------|----------------|
+| `"tfidf"` (default) | In-memory TF-IDF sparse search | **Required** — maps to `data_<lib>/chunks.jsonl` |
+| `"vector"` | Supabase pgvector via RPC `match_lib_<lib>` | **Optional**, default `"psy"` (e.g. `psy`, `dao`) |
+
+Requires `API_KEY` for the LLM step. Vector mode also requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, plus the matching `match_lib_<lib>` SQL function and `agent_lib_<lib>` table.
 
 **Request Body:**
 ```json
@@ -223,10 +255,30 @@ Supports two retrieval backends via `search_mode`:
 |-------|------|----------|---------|-------------|
 | `q` | string | Yes | — | User question |
 | `search_mode` | string | No | `"tfidf"` | Retrieval backend: `"tfidf"` or `"vector"` |
-| `lib` | string | Conditional | — | Library name (required when `search_mode` is `"tfidf"`) |
+| `lib` | string | Conditional | `""` (tfidf) / `"psy"` (vector) | TF-IDF: required. Vector: selects `match_lib_<lib>` (default `psy`) |
 | `topk` | number | No | `10` | Number of chunks to retrieve (1–50) |
 | `messages` | array | No | `[]` | Prior conversation messages for multi-turn context. Each has `role` and `content`. |
-| `system_prompt` | string | No | (built-in RAG prompt) | Override system prompt; when null or omitted, server uses default RAG system prompt with context. |
+| `system_prompt` | string \| number | No | built-in template `[0]` | See **System prompt** below. Alias: `systemPrompt`. |
+
+#### System prompt (`system_prompt`)
+
+The server builds two system messages: (1) the resolved system prompt, (2) retrieved citations.
+
+| Value | Behavior |
+|-------|----------|
+| omitted, `null`, or `""` | Built-in template **index `0`** |
+| integer `0`, `1`, `2` or string `"0"`, `"1"`, `"2"` | Built-in template at that index |
+| any other non-empty string | Used verbatim as the custom system prompt |
+
+Built-in templates (indices):
+
+| Index | Summary |
+|-------|---------|
+| `0` | Professional counseling with Tibetan Buddhist worldview (default) |
+| `1` | Professional counseling with Daoist worldview |
+| `2` | Generic counseling — empathy plus practical advice from retrieved context |
+
+Out-of-range index → `400` with `available_templates` count.
 
 **Success Response — TF-IDF mode (200):**
 ```json
@@ -256,17 +308,28 @@ Supports two retrieval backends via `search_mode`:
     {
       "rank": 1,
       "score": 0.8234,
-      "text": "..."
+      "text": "...",
+      "resource_name": "source-file-name"
     }
-  ]
+  ],
+  "system_prompt_template_index": 0
 }
 ```
 
+| Response field | Description |
+|----------------|-------------|
+| `text` | LLM answer |
+| `sources` | Retrieval hits used as context (shape depends on `search_mode`) |
+| `system_prompt_template_index` | Present when a built-in template index was used (`0`–`2`); omitted for a custom string prompt |
+
 **Error Responses:**
 
-- `400` — Missing `q`, or missing `lib` when `search_mode` is `"tfidf"`
-- `404` — Library not found (TF-IDF mode only)
-- `500` — API key not configured, Supabase not configured, or internal error
+- `400` — Missing `q`; missing `lib` when `search_mode` is `"tfidf"`; invalid `system_prompt` index
+```json
+{ "error": "system_prompt index 9 out of range (0–2)", "available_templates": 3 }
+```
+- `404` — TF-IDF `lib` not found
+- `500` — `API_KEY` not configured, Supabase not configured, invalid vector `lib`, or internal error
 
 **Example — TF-IDF mode:**
 ```bash
@@ -275,11 +338,18 @@ curl -X POST http://localhost:4403/api/search_and_chat \
   -d '{"q": "藏传佛教如何看待死亡", "lib": "tfidf", "topk": 10}'
 ```
 
-**Example — Vector mode:**
+**Example — Vector mode (default lib `psy`, template `[0]`):**
 ```bash
 curl -X POST http://localhost:4403/api/search_and_chat \
   -H "Content-Type: application/json" \
   -d '{"q": "如何面对焦虑", "search_mode": "vector", "topk": 10}'
+```
+
+**Example — Vector mode with `lib=dao` and built-in template `[1]` (Daoist counseling):**
+```bash
+curl -X POST http://localhost:4403/api/search_and_chat \
+  -H "Content-Type: application/json" \
+  -d '{"q": "如何定心安神", "search_mode": "vector", "lib": "dao", "system_prompt": 1, "topk": 10}'
 ```
 
 **Example — Vector mode with multi-turn context and custom system prompt:**
@@ -289,6 +359,7 @@ curl -X POST http://localhost:4403/api/search_and_chat \
   -d '{
     "q": "那具体应该怎么做呢",
     "search_mode": "vector",
+    "lib": "psy",
     "topk": 10,
     "system_prompt": "你是专业心理咨询师，用共情与接纳回应用户，并给出可实践的建议。",
     "messages": [
@@ -296,6 +367,13 @@ curl -X POST http://localhost:4403/api/search_and_chat \
       {"role": "assistant", "content": "面对焦虑时，可以尝试……"}
     ]
   }'
+```
+
+**Example — Built-in generic template `[2]`:**
+```bash
+curl -X POST http://localhost:4403/api/search_and_chat \
+  -H "Content-Type: application/json" \
+  -d '{"q": "最近压力很大", "search_mode": "vector", "system_prompt": "2"}'
 ```
 
 ---
@@ -334,6 +412,114 @@ Default transcription model: `openai/gpt-4o-audio-preview`. Override with env `O
 
 ---
 
+## Certificate Endpoints
+
+These endpoints use Supabase table **`agent_lib_cert_master`**. Requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Creating a certificate also requires env **`PASSWD`** (shared secret sent as `passwd` in the JSON body).
+
+### `POST /api/new_cert`
+
+Insert a new certificate row. **Protected** by `passwd` matching server env `PASSWD`.
+
+**Request Body:**
+```json
+{
+  "passwd": "<same as server PASSWD>",
+  "owner": "display or wallet id",
+  "cert_name": "Human-readable certificate name"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `passwd` | string | Yes | Must equal environment variable `PASSWD` |
+| `owner` | string | Yes | Owner identifier (non-empty after trim) |
+| `cert_name` | string | Yes | Certificate name (non-empty after trim) |
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "cert_id": "...",
+    "owner": "...",
+    "cert_name": "...",
+    "created_at": "..."
+  }
+}
+```
+
+The exact fields in `data` match your Supabase schema (at minimum expect identifiers such as `cert_id` for use with `GET /api/verify_cert`).
+
+**Error Responses:**
+
+- `401` — `passwd` missing or does not match `PASSWD`
+- `400` — Missing `owner` or `cert_name`
+- `500` — Supabase not configured or insert error
+
+**Example:**
+```bash
+curl -X POST http://localhost:4403/api/new_cert \
+  -H "Content-Type: application/json" \
+  -d '{"passwd":"YOUR_PASSWD","owner":"alice","cert_name":"Agent Lib 2026"}'
+```
+
+---
+
+### `GET /api/verify_cert`
+
+Public lookup: returns the certificate row if **`cert_id`** exists in `agent_lib_cert_master`.
+
+**Query Parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `cert_id` | string | Yes | Certificate id (column `cert_id` on the table) |
+
+**Success Response (200):**
+```json
+{
+  "valid": true,
+  "cert": {
+    "cert_id": "...",
+    "owner": "...",
+    "cert_name": "...",
+    "created_at": "..."
+  }
+}
+```
+
+**Error Responses:**
+
+- `400` — Missing `cert_id`
+```json
+{ "error": "query parameter 'cert_id' is required" }
+```
+
+- `404` — No row with that `cert_id`
+```json
+{ "error": "certificate not found", "cert_id": "..." }
+```
+
+- `500` — Supabase not configured or query error
+
+**Example:**
+```bash
+curl "http://localhost:4403/api/verify_cert?cert_id=<id-from-new_cert-response>"
+```
+
+---
+
+## Vector search setup (Supabase)
+
+For each vector library name `lib` (e.g. `psy`, `dao`):
+
+1. Table `agent_lib_<lib>` with text rows and a `vector(1024)` embedding column (see `scripts/vector.js` for backfill).
+2. SQL RPC `match_lib_<lib>(query_embedding, match_threshold, match_count)` returning `embedding_input`, `similarity`, and optionally `source_name`.
+
+The server calls `supabase.rpc("match_lib_" + lib, …)` with embeddings from OpenRouter `qwen/qwen3-embedding-4b` (1024 dimensions).
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -342,7 +528,8 @@ Default transcription model: `openai/gpt-4o-audio-preview`. Override with env `O
 | `OPENROUTER_TRANSCRIPTION_MODEL` | No | `openai/gpt-4o-audio-preview` | Model for `/api/trans_cantonese` (must support audio input on OpenRouter) |
 | `FFMPEG_PATH` | No | `ffmpeg` on PATH | Used to convert m4a/aac/… → mp3 in memory when file is not WAV/MP3 |
 | `SUPABASE_URL` | No | — | Supabase project URL (required for vector search) |
-| `SUPABASE_SERVICE_ROLE_KEY` | No | — | Supabase service-role key (required for vector search) |
+| `SUPABASE_SERVICE_ROLE_KEY` | No | — | Supabase service-role key (required for vector search and certificate endpoints) |
+| `PASSWD` | No | — | Shared secret for `POST /api/new_cert` (body field `passwd` must match) |
 | `SERVER_PORT` | No | `4403` | Server listen port |
 
 ---

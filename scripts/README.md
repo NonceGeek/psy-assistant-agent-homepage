@@ -51,6 +51,8 @@ The script calls OpenRouter embeddings (`qwen/qwen3-embedding-4b`, 1024 dimensio
 
 ```bash
 node --env-file=.env scripts/vector.js
+# optional table (default: agent_lib_psy)
+node --env-file=.env scripts/vector.js --table agent_lib_psy
 ```
 
 From the `scripts/` directory, point `--env-file` at the path where your `.env` lives.

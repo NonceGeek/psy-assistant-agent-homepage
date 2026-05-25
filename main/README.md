@@ -34,7 +34,7 @@ A configurable Next.js scaffold for building AI Agent homepages with a built-in 
 
 * **freeTierDescription**
   * **description:** Description text for the free tier card
-  * **value:** `"Chat with the PsyAssistant for free. \n与PsyAssistant免费聊天！"`
+  * **value:** `"Chat with the PsyAssistant for free. \n与 PsyAssistant 免费聊天！"`
 
 * **freeTierLink**
   * **description:** Link target for the free tier button
@@ -58,6 +58,7 @@ A configurable Next.js scaffold for building AI Agent homepages with a built-in 
 
 * **chatApiUrl**
   * **description:** Backend API endpoint for the chat
+  <!-- * **value:** `"http://localhost:8000/api/search_and_chat"` -->
   * **value:** `"https://api.scaffold-agent-homepage.leeduckgo.com/api/search_and_chat"`
 
 * **chatLib**

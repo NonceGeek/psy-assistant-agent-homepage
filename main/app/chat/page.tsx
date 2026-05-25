@@ -11,7 +11,7 @@ export default function ChatPage() {
       chatbotDescription={config.chatbotDescription}
       chatbotIntroMessage={config.chatbotIntroMessage}
       chatApiUrl={config.chatApiUrl}
-      chatLib={config.chatLib}
+      chatLib={config.searchMode === "tfidf" ? config.chatLib : "psy"}
       searchMode={config.searchMode}
       prompt1={config.prompts?.prompt1}
     />

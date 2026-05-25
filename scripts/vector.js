@@ -6,6 +6,8 @@
 
 用法：
   node --env-file=.env scripts/vector.js
+  node --env-file=.env scripts/vector.js --table agent_lib_psy
+  node --env-file=.env scripts/vector.js agent_lib_psy
 */
 
 import { createClient } from "@supabase/supabase-js";
@@ -25,7 +27,29 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const EMBEDDING_MODEL = "qwen/qwen3-embedding-4b";
 const EMBEDDING_DIMENSIONS = 1024;
-const TABLE = "agent_lib_psy";
+const DEFAULT_TABLE = "agent_lib_psy";
+
+function parseTableName() {
+  const args = process.argv.slice(2);
+  const flagIdx = args.indexOf("--table");
+  if (flagIdx !== -1) {
+    const name = args[flagIdx + 1];
+    if (!name || name.startsWith("-")) {
+      console.error("Missing value for --table");
+      process.exit(1);
+    }
+    return name;
+  }
+  const positional = args.find((a) => !a.startsWith("-"));
+  return positional || DEFAULT_TABLE;
+}
+
+const TABLE = parseTableName();
+if (!/^[a-zA-Z0-9_]+$/.test(TABLE)) {
+  console.error(`Invalid table name "${TABLE}": use letters, digits, or underscores only`);
+  process.exit(1);
+}
+console.log(`Using table: ${TABLE}`);
 
 async function retry(fn, { retries = 5, baseDelay = 1000 } = {}) {
   for (let attempt = 0; ; attempt++) {
