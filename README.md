@@ -1,4 +1,4 @@
-# Scaffold Agent Homepage/ Psy Assistant Agent
+# Scaffold Agent Homepage / Psy Assistant Agent
 
 > [https://psy.agent.leeduckgo.com/](https://psy.agent.leeduckgo.com/)
 >
