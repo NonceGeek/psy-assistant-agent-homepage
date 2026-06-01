@@ -1,6 +1,6 @@
-# Scaffold Agent Homepage
+# Scaffold Agent Homepage/ Psy Assistant Agent
 
-> [https://scaffold-agent-homepage.leeduckgo.com/](https://scaffold-agent-homepage.leeduckgo.com/)
+> [https://psy.agent.leeduckgo.com/](https://psy.agent.leeduckgo.com/)
 >
 >
 > A configurable scaffold for building AI Agent homepages with a built-in chat interface.
