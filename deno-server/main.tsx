@@ -25,9 +25,13 @@ const OPENROUTER_KEY = Deno.env.get("API_KEY") || "";
 const CHAT_MODEL = "qwen/qwen3-30b-a3b";
 const EMBEDDING_MODEL = "qwen/qwen3-embedding-4b";
 const EMBEDDING_DIMENSIONS = 1024;
-/** OpenRouter has no /v1/audio/transcriptions; use chat completions + audio-input model (see docs/multimodal/audio). */
+/** OpenRouter STT: POST /v1/audio/transcriptions (see docs/guides/overview/multimodal/stt). */
 const TRANSCRIPTION_MODEL =
-  Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || "openai/gpt-4o-audio-preview";
+  Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || "qwen/qwen3-asr-flash-2026-02-10";
+// 
+// openai/gpt-4o-mini-transcribe
+const OPENROUTER_HTTP_REFERER = Deno.env.get("OPENROUTER_HTTP_REFERER") || "";
+const OPENROUTER_SITE_TITLE = Deno.env.get("OPENROUTER_SITE_TITLE") || "";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -286,8 +290,27 @@ function inferAudioFormat(filename: string, mimeType: string): string {
   return "wav";
 }
 
+/** Map BCP-47 / Cantonese hints to ISO-639-1 for OpenRouter STT `language`. */
+function sttLanguageHint(lang: string): string | undefined {
+  const lower = lang.trim().toLowerCase();
+  if (!lower || lower === "auto") return undefined;
+  if (lower === "yue" || lower === "zh-yue" || lower.includes("cantonese")) return "zh";
+  return lower.length <= 3 ? lower : lower.slice(0, 2);
+}
+
+function openRouterHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${OPENROUTER_KEY}`,
+  };
+  if (OPENROUTER_HTTP_REFERER) headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER;
+  if (OPENROUTER_SITE_TITLE) headers["X-OpenRouter-Title"] = OPENROUTER_SITE_TITLE;
+  return headers;
+}
+
 /**
- * Cantonese audio via OpenRouter: chat completions + input_audio (not OpenAI Whisper multipart URL).
+ * Cantonese audio via OpenRouter STT: POST /v1/audio/transcriptions with base64 input_audio.
+ * `task: "translate"` falls back to chat completions (STT endpoint is transcribe-only).
  */
 async function transcribeCantoneseAudio(params: {
   file: File;
@@ -307,41 +330,53 @@ async function transcribeCantoneseAudio(params: {
   const lang = (params.language ?? "yue").trim().toLowerCase();
   const task = params.task === "translate" ? "translate" : "transcribe";
 
-  let instruction =
-    task === "translate"
-      ? "Listen to this audio and translate the speech into clear English. Output only the English translation, no labels or commentary."
-      : lang === "yue" || lang === "zh-yue" || lang.includes("cantonese")
-        ? "Transcribe this audio. The speaker is using Cantonese (Yue Chinese). Output only the spoken words in appropriate Chinese characters (粵語口語書寫可). No commentary, no translation unless the speech mixes languages."
-        : `Transcribe this audio accurately. The primary language hint is: ${lang}. Output only the transcription text, no commentary.`;
+  if (task === "translate") {
+    let instruction =
+      "Listen to this audio and translate the speech into clear English. Output only the English translation, no labels or commentary.";
+    if (params.prompt?.trim()) {
+      instruction += ` Additional context: ${params.prompt.trim()}`;
+    }
 
-  if (params.prompt?.trim()) {
-    instruction += ` Additional context: ${params.prompt.trim()}`;
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: openRouterHeaders(),
+      body: JSON.stringify({
+        model: TRANSCRIPTION_MODEL,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: instruction },
+              {
+                type: "input_audio",
+                input_audio: { data: base64Audio, format },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`OpenRouter translation ${resp.status}: ${err.slice(0, 2000)}`);
+    }
+
+    const data = await resp.json();
+    return data.choices?.[0]?.message?.content?.trim() ?? "";
   }
 
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const body: Record<string, unknown> = {
+    model: TRANSCRIPTION_MODEL,
+    input_audio: { data: base64Audio, format },
+  };
+  const language = sttLanguageHint(lang);
+  if (language) body.language = language;
+
+  const resp = await fetch("https://openrouter.ai/api/v1/audio/transcriptions", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENROUTER_KEY}`,
-    },
-    body: JSON.stringify({
-      model: TRANSCRIPTION_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: instruction },
-            {
-              type: "input_audio",
-              input_audio: {
-                data: base64Audio,
-                format,
-              },
-            },
-          ],
-        },
-      ],
-    }),
+    headers: openRouterHeaders(),
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -350,7 +385,7 @@ async function transcribeCantoneseAudio(params: {
   }
 
   const data = await resp.json();
-  return data.choices?.[0]?.message?.content?.trim() ?? "";
+  return data.text?.trim() ?? "";
 }
 
 type VectorResult = {
@@ -628,7 +663,7 @@ router
     }
   })
   .post("/api/trans_cantonese", async (context) => {
-    // Cantonese audio transcription/translation via OpenRouter chat + input_audio (see TRANSCRIPTION_MODEL).
+    // Cantonese audio via OpenRouter STT (/v1/audio/transcriptions); translate uses chat completions fallback.
     // Request: multipart/form-data with:
     // - file: audio file (required)
     // - language: optional (default "yue")
@@ -1017,7 +1052,7 @@ app.use(oakCors());
 app.use(router.routes());
 
 // Start server
-const port = 8000;
+const port = 3003;
 
 const isDeploy =
   Boolean(Deno.env.get("DENO_DEPLOYMENT_ID")) || Boolean(Deno.env.get("DENO_REGION"));
